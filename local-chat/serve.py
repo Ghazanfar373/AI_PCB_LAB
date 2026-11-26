@@ -26,6 +26,7 @@ PORT = 8765
 SD_ROOT = os.path.join(ROOT, "sd")
 MODELS = os.path.join(SD_ROOT, "models")
 ENGINE_FILE = os.path.join(SD_ROOT, "engine.txt")
+STAMP_FILE = os.path.join(SD_ROOT, "launch.txt")
 LOCK = threading.Lock()
 TOKEN = 0
 STATE = {"phase": "idle", "error": "", "message": ""}
@@ -45,6 +46,15 @@ MODES = {
             os.path.join(MODELS, "diffusion_models", "qwen_image_2.1-Q4_K.gguf"),
             os.path.join(MODELS, "vae", "qwen_image_2.1_vae_bf16.safetensors"),
             os.path.join(MODELS, "text_encoders", "Qwen3VL-8B-Instruct-Q4_K_M.gguf"),
+        ],
+        "vision": os.path.join(MODELS, "text_encoders", "mmproj-Qwen3VL-8B-Instruct-F16.gguf"),
+    },
+    "zimage": {
+        "label": "Z-Image Turbo",
+        "files": [
+            os.path.join(MODELS, "diffusion_models", "z_image_turbo-Q4_K.gguf"),
+            os.path.join(MODELS, "vae", "ae.safetensors"),
+            os.path.join(MODELS, "text_encoders", "Qwen3-4B-Instruct-2507-Q4_K_M.gguf"),
         ],
     },
     "animate": {
@@ -88,6 +98,27 @@ def write_engine(name):
         handle.write(name)
 
 
+def launch_signature(mode):
+    parts = [mode]
+    if MODES.get(mode, {}).get("vision"):
+        parts.append("vision")
+    return " ".join(parts)
+
+
+def read_stamp():
+    try:
+        with open(STAMP_FILE, encoding="utf-8") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
+def write_stamp(mode):
+    os.makedirs(SD_ROOT, exist_ok=True)
+    with open(STAMP_FILE, "w", encoding="utf-8") as handle:
+        handle.write(launch_signature(mode))
+
+
 MIN_BYTES = {
     "flux-2-klein-4b-Q4_K.gguf": 2400000000,
     "flux2-vae.safetensors": 300000000,
@@ -95,15 +126,27 @@ MIN_BYTES = {
     "qwen_image_2.1-Q4_K.gguf": 3800000000,
     "qwen_image_2.1_vae_bf16.safetensors": 500000000,
     "Qwen3VL-8B-Instruct-Q4_K_M.gguf": 4200000000,
+    "mmproj-Qwen3VL-8B-Instruct-F16.gguf": 1100000000,
     "Wan2.2-TI2V-5B-Q4_K_S.gguf": 2500000000,
     "wan2.2_vae.safetensors": 1200000000,
     "umt5-xxl-encoder-Q4_K_M.gguf": 3400000000,
+    "z_image_turbo-Q4_K.gguf": 3800000000,
+    "ae.safetensors": 320000000,
+    "Qwen3-4B-Instruct-2507-Q4_K_M.gguf": 2400000000,
 }
+
+
+def mode_files(mode):
+    paths = list(MODES[mode]["files"])
+    vision = MODES[mode].get("vision")
+    if vision:
+        paths.append(vision)
+    return paths
 
 
 def missing_files(mode):
     missing = []
-    for path in MODES[mode]["files"]:
+    for path in mode_files(mode):
         minimum = MIN_BYTES.get(os.path.basename(path), 1000000)
         if not os.path.isfile(path) or os.path.getsize(path) < minimum:
             missing.append(path)
@@ -189,6 +232,7 @@ def launch_sd(token, mode, exe):
         return
     label = MODES[mode]["label"]
     diffusion, vae, encoder = MODES[mode]["files"]
+    vision = MODES[mode].get("vision", "")
     args = [
         exe,
         "--listen-ip", "127.0.0.1",
@@ -202,9 +246,10 @@ def launch_sd(token, mode, exe):
     if mode == "animate":
         args += ["--t5xxl", encoder, "--cfg-scale", "6.0", "--vae-tiling"]
     elif mode == "qwen":
-        args += ["--llm", encoder, "--cfg-scale", "6.0", "--backend", "te=cpu", "--vae-tiling"]
+        args += ["--llm", encoder, "--llm_vision", vision, "--cfg-scale", "6.0", "--backend", "te=cpu", "--vae-tiling"]
     else:
         args += ["--llm", encoder, "--cfg-scale", "1.0"]
+    write_stamp(mode)
     log_path = os.path.join(SD_ROOT, "sd-server.log")
     with open(log_path, "ab") as log:
         log.write(("\n--- start %s ---\n" % mode).encode())
@@ -235,7 +280,7 @@ def start_sd(mode):
     exe = find_sd_exe()
     if not exe:
         raise RuntimeError("The picture server is not installed yet. Wait a minute and try again.")
-    if port_open(SD_PORT) and read_engine() == mode and STATE["phase"] != "error":
+    if port_open(SD_PORT) and read_engine() == mode and read_stamp() == launch_signature(mode) and STATE["phase"] != "error":
         STATE["phase"] = "ready"
         STATE["target"] = mode
         STATE["error"] = ""
